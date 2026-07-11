@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Gridlock — City Drive</title>
+<style>
+  :root{
+    --asphalt:#2b2d33;
+    --asphalt-dark:#202127;
+    --curb:#e8dcc0;
+    --lane:#f2c94c;
+    --building:#3d4b52;
+    --building-2:#4a5a61;
+    --ink:#f4efe3;
+    --ink-dim:#a9a498;
+    --accent:#e8543a;
+    --accent-2:#3fa796;
+    --panel:#1c1d22;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; height:100%;
+    background:var(--asphalt-dark);
+    font-family: 'Courier New', ui-monospace, monospace;
+    color:var(--ink);
+    overflow:hidden;
+    -webkit-user-select:none; user-select:none;
+  }
+  #stage{
+    position:relative;
+    width:100%; height:100%;
+    display:flex; align-items:center; justify-content:center;
+  }
+  canvas{
+    display:block;
+    background:var(--asphalt);
+    box-shadow: 0 0 0 3px var(--curb), 0 0 40px rgba(0,0,0,0.6);
+    border-radius:4px;
+    touch-action:none;
+  }
+  .hud{
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    display:flex; gap:24px; align-items:center;
+    background:var(--panel);
+    padding:8px 20px;
+    border-radius:3px;
+    border:1px solid #3a3b42;
+    font-size:13px; letter-spacing:1px;
+    z-index:5;
+  }
+  .hud .label{ color:var(--ink-dim); margin-right:6px; }
+  .hud .val{ color:var(--lane); font-weight:bold; }
+
+  .overlay{
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    background: rgba(20,20,24,0.86);
+    z-index:10;
+    flex-direction:column;
+    text-align:center;
+    padding:20px;
+  }
+  .overlay.hidden{ display:none; }
+  .title{
+    font-size:38px; letter-spacing:4px; margin:0 0 4px;
+    color:var(--ink);
+    text-shadow: 3px 3px 0 var(--accent);
+  }
+  .sub{ color:var(--ink-dim); margin-bottom:28px; font-size:13px; letter-spacing:2px;}
+
+  .fleet{
+    display:flex; gap:18px; margin-bottom:30px;
+  }
+  .car-pick{
+    background:var(--panel);
+    border:2px solid #3a3b42;
+    border-radius:6px;
+    padding:16px 18px;
+    cursor:pointer;
+    transition: border-color .15s, transform .15s;
+    width:120px;
+  }
+  .car-pick:hover{ transform:translateY(-3px); }
+  .car-pick.selected{ border-color:var(--lane); }
+  .car-pick canvas{ box-shadow:none; background:transparent; border-radius:0; margin-bottom:8px;}
+  .car-pick .name{ font-size:12px; letter-spacing:1px; color:var(--ink); }
+  .car-pick .stat{ font-size:10px; color:var(--ink-dim); margin-top:2px;}
+
+  .btn{
+    background:var(--accent);
+    color:var(--ink);
+    border:none;
+    padding:12px 34px;
+    font-family:inherit;
+    font-size:14px;
+    letter-spacing:2px;
+    border-radius:3px;
+    cursor:pointer;
+    transition: background .15s, transform .1s;
+  }
+  .btn:hover{ background:#f16548; }
+  .btn:active{ transform:scale(0.97); }
+
+  .controls-hint{
+    margin-top:22px; font-size:11px; color:var(--ink-dim); letter-spacing:1px;
+  }
+  .final-score{ font-size:52px; color:var(--lane); margin:6px 0 2px; }
+  .best{ font-size:12px; color:var(--ink-dim); margin-bottom:26px; letter-spacing:1px;}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="420" height="640"></canvas>
+
+  <div class="hud" id="hud" style="display:none;">
+    <div><span class="label">DIST</span><span class="val" id="scoreVal">0</span>m</div>
+    <div><span class="label">BEST</span><span class="val" id="bestVal">0</span>m</div>
+  </div>
+
+  <div class="overlay" id="startScreen">
+    <div class="title">GRIDLOCK</div>
+    <div class="sub">CITY ROADS · PICK YOUR RIDE</div>
+    <div class="fleet" id="fleet"></div>
+    <button class="btn" id="startBtn">START ENGINE</button>
+    <div class="controls-hint">◀ ▶ or A / D to steer &nbsp;·&nbsp; hold to switch lanes fast</div>
+  </div>
+
+  <div class="overlay hidden" id="endScreen">
+    <div class="title" style="text-shadow:3px 3px 0 var(--accent-2);">CRASHED</div>
+    <div class="final-score" id="finalScore">0</div>
+    <div class="best" id="finalBest">meters · best 0</div>
+    <button class="btn" id="retryBtn">TRY AGAIN</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // ---- Road geometry ----
+  const LANES = 3;
+  const ROAD_MARGIN = 30;
+  const roadW = W - ROAD_MARGIN*2;
+  const laneW = roadW / LANES;
+  function laneX(i){ return ROAD_MARGIN + laneW*i + laneW/2; }
+
+  // ---- Fleet definitions (small variety, distinct silhouettes/colors) ----
+  const FLEET = [
+    { id:'taxi',   name:'TAXI',    body:'#f2c94c', roof:'#2b2d33', trim:'#2b2d33', speed:1.0,  grip:1.0,  stat:'BALANCED' },
+    { id:'sedan',  name:'SEDAN',   body:'#3fa796', roof:'#1f2d2b', trim:'#e8dcc0', speed:0.88, grip:1.15, stat:'STEADY'   },
+    { id:'sport',  name:'SPORT',   body:'#e8543a', roof:'#2b2d33', trim:'#f4efe3', speed:1.22, grip:0.85, stat:'FAST'     },
+  ];
+  let chosen = FLEET[0];
+
+  function drawCarShape(c, ctx, x, y, w, h, color) {
+    // simple top-down car: body rounded rect + windshield band + roof
+    ctx.save();
+    ctx.translate(x, y);
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    roundRect(ctx, -w/2+2, -h/2+4, w, h, 6);
+    ctx.fill();
+    // body
+    ctx.fillStyle = color.body;
+    roundRect(ctx, -w/2, -h/2, w, h, 6);
+    ctx.fill();
+    // roof
+    ctx.fillStyle = color.roof;
+    roundRect(ctx, -w/2+w*0.16, -h/2+h*0.22, w*0.68, h*0.4, 4);
+    ctx.fill();
+    // trim stripe
+    ctx.fillStyle = color.trim;
+    ctx.fillRect(-w/2+2, -2, w-4, 4);
+    // headlights
+    ctx.fillStyle = '#fff6cc';
+    ctx.fillRect(-w/2+3, -h/2+2, 5, 4);
+    ctx.fillRect(w/2-8, -h/2+2, 5, 4);
+    // taillights
+    ctx.fillStyle = '#c33';
+    ctx.fillRect(-w/2+3, h/2-6, 5, 4);
+    ctx.fillRect(w/2-8, h/2-6, 5, 4);
+    ctx.restore();
+  }
+  function roundRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  // ---- Picker UI ----
+  const fleetEl = document.getElementById('fleet');
+  FLEET.forEach((c, idx)=>{
+    const wrap = document.createElement('div');
+    wrap.className = 'car-pick' + (idx===0?' selected':'');
+    const mini = document.createElement('canvas');
+    mini.width = 90; mini.height = 90;
+    wrap.appendChild(mini);
+    const name = document.createElement('div');
+    name.className='name'; name.textContent = c.name;
+    wrap.appendChild(name);
+    const stat = document.createElement('div');
+    stat.className='stat'; stat.textContent = c.stat;
+    wrap.appendChild(stat);
+    fleetEl.appendChild(wrap);
+
+    const mctx = mini.getContext('2d');
+    mctx.translate(45,45);
+    mctx.rotate(0);
+    mctx.translate(-45,-45);
+    drawCarShape(c, mctx, 45, 45, 34, 54, c);
+
+    wrap.addEventListener('click', ()=>{
+      document.querySelectorAll('.car-pick').forEach(el=>el.classList.remove('selected'));
+      wrap.classList.add('selected');
+      chosen = c;
+    });
+  });
+
+  // ---- Game state ----
+  let best = Number(localStorage.getItem('gridlock_best')||0) || 0;
+  document.getElementById('bestVal').textContent = best;
+
+  let player, traffic, dist, speed, running, keys, spawnTimer, lastTime;
+
+  function resetGame(){
+    player = { lane:1, x: laneX(1), y: H-110, w:34, h:54, targetLane:1 };
+    traffic = [];
+    dist = 0;
+    speed = 3.2 * chosen.speed;
+    running = true;
+    spawnTimer = 0;
+    lastTime = performance.now();
+    keys = {};
+  }
+
+  function spawnCar(){
+    const lane = Math.floor(Math.random()*LANES);
+    const palette = ['#6b7f8c','#8c6b6b','#7a8c6b','#6b7a8c','#8c7a6b'];
+    const car = {
+      lane, x: laneX(lane), y: -80, w:32, h:52,
+      color: palette[Math.floor(Math.random()*palette.length)],
+      vSpeed: 1.6 + Math.random()*1.4
+    };
+    traffic.push(car);
+  }
+
+  // ---- Input ----
+  window.addEventListener('keydown', e=>{
+    if(['ArrowLeft','ArrowRight','a','d','A','D'].includes(e.key)) e.preventDefault();
+    keys[e.key.toLowerCase()] = true;
+  });
+  window.addEventListener('keyup', e=>{
+    keys[e.key.toLowerCase()] = false;
+  });
+
+  // touch controls: tap left/right half
+  canvas.addEventListener('pointerdown', e=>{
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX-rect.left) * (W/rect.width);
+    if(px < W/2) movePlayer(-1); else movePlayer(1);
+  });
+
+  let lastLaneShift = 0;
+  function movePlayer(dir){
+    const now = performance.now();
+    if(now - lastLaneShift < 140) return;
+    lastLaneShift = now;
+    player.targetLane = Math.max(0, Math.min(LANES-1, player.targetLane+dir));
+  }
+
+  function handleContinuousInput(){
+    if(keys['arrowleft']||keys['a']) movePlayer(-1);
+    if(keys['arrowright']||keys['d']) movePlayer(1);
+  }
+
+  // ---- Building scenery ----
+  let scenery = [];
+  function initScenery(){
+    scenery = [];
+    for(let i=0;i<10;i++){
+      scenery.push(makeBuilding(-1, i* (H/5)));
+      scenery.push(makeBuilding(1, i* (H/5)));
+    }
+  }
+  function makeBuilding(side, y){
+    const w = 40+Math.random()*30;
+    return {
+      side, y,
+      w, h: 60+Math.random()*80,
+      color: Math.random()>0.5? 'var(--building)':'#3d4b52',
+      lit: Math.random()>0.5
+    };
+  }
+  initScenery();
+
+  let roadOffset = 0;
+
+  function update(dt){
+    handleContinuousInput();
+    // smooth lane transition
+    const tx = laneX(player.targetLane);
+    player.x += (tx - player.x) * Math.min(1, dt*10);
+    player.lane = player.targetLane;
+
+    speed += dt*0.05; // gradual ramp
+    dist += speed*dt*6;
+    roadOffset = (roadOffset + speed*dt*60) % 40;
+
+    // scenery scroll
+    scenery.forEach(b=>{
+      b.y += speed*dt*60;
+      if(b.y > H+100){ b.y = -150 - Math.random()*100; b.w = 40+Math.random()*30; b.h = 60+Math.random()*80; b.lit = Math.random()>0.5; }
+    });
+
+    // traffic spawn
+    spawnTimer -= dt;
+    if(spawnTimer <= 0){
+      spawnCar();
+      spawnTimer = Math.max(0.45, 1.3 - dist/4000);
+    }
+
+    // traffic move + collision
+    for(let i=traffic.length-1;i>=0;i--){
+      const c = traffic[i];
+      c.y += (speed*0.9 + c.vSpeed) * dt*60;
+      if(c.y > H+100) traffic.splice(i,1);
+
+      // collision check (AABB, generous grace)
+      if(Math.abs(c.x-player.x) < (c.w+player.w)/2 - 8 &&
+         Math.abs(c.y-player.y) < (c.h+player.h)/2 - 8){
+        crash();
+      }
+    }
+  }
+
+  function crash(){
+    running = false;
+    const finalDist = Math.floor(dist);
+    if(finalDist > best){ best = finalDist; localStorage.setItem('gridlock_best', best); }
+    document.getElementById('finalScore').textContent = finalDist;
+    document.getElementById('finalBest').textContent = 'meters · best ' + best;
+    document.getElementById('endScreen').classList.remove('hidden');
+    document.getElementById('hud').style.display = 'none';
+  }
+
+  function drawRoad(){
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--asphalt');
+    ctx.fillRect(0,0,W,H);
+
+    // curbs
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--curb');
+    ctx.fillRect(0,0,ROAD_MARGIN,H);
+    ctx.fillRect(W-ROAD_MARGIN,0,ROAD_MARGIN,H);
+
+    // lane dashes
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--lane');
+    ctx.lineWidth = 3;
+    ctx.setLineDash([22,18]);
+    for(let i=1;i<LANES;i++){
+      const x = ROAD_MARGIN + laneW*i;
+      ctx.beginPath();
+      ctx.lineDashOffset = -roadOffset;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  function drawScenery(){
+    scenery.forEach(b=>{
+      const x = b.side<0 ? ROAD_MARGIN - b.w - 6 : W-ROAD_MARGIN + 6;
+      ctx.fillStyle = b.lit ? '#4a5a61' : '#39454b';
+      ctx.fillRect(x, b.y, b.w, b.h);
+      // windows
+      ctx.fillStyle = b.lit ? '#f2c94c' : '#2a3236';
+      for(let wy=6; wy<b.h-6; wy+=14){
+        for(let wx=6; wx<b.w-6; wx+=12){
+          if(Math.random()>0.15) ctx.fillRect(x+wx, b.y+wy, 5,7);
+        }
+      }
+    });
+  }
+
+  function draw(){
+    drawRoad();
+    drawScenery();
+
+    // traffic
+    traffic.forEach(c=>{
+      drawCarShape(c, ctx, c.x, c.y, c.w, c.h, {body:c.color, roof:'#20242b', trim:'#20242b'});
+    });
+
+    // player
+    drawCarShape(chosen, ctx, player.x, player.y, player.w, player.h, chosen);
+
+    // score
+    document.getElementById('scoreVal').textContent = Math.floor(dist);
+  }
+
+  function loop(now){
+    if(!running) return;
+    const dt = Math.min(0.033, (now-lastTime)/1000);
+    lastTime = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  document.getElementById('startBtn').addEventListener('click', ()=>{
+    document.getElementById('startScreen').classList.add('hidden');
+    document.getElementById('hud').style.display = 'flex';
+    resetGame();
+    requestAnimationFrame(loop);
+  });
+
+  document.getElementById('retryBtn').addEventListener('click', ()=>{
+    document.getElementById('endScreen').classList.add('hidden');
+    document.getElementById('hud').style.display = 'flex';
+    document.getElementById('bestVal').textContent = best;
+    resetGame();
+    requestAnimationFrame(loop);
+  });
+
+  // initial idle render behind start screen
+  resetGame();
+  running = false;
+  draw();
+})();
+</script>
+</body>
+</html>
